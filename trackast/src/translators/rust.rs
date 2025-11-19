@@ -125,6 +125,37 @@ impl RustTranslator {
                     calls.push(name);
                 }
             }
+
+            // Extract function references passed to method calls like .to(), .service()
+            // e.g., .route("/path", web::get().to(handler_func))
+            if let Some(callee) = node.child(0) {
+                if callee.kind() == "field_expression" {
+                    // Get the method name
+                    if let Some(field) = callee.child(callee.child_count() - 1) {
+                        if field.kind() == "field" {
+                            let method_name = &source[field.start_byte()..field.end_byte()];
+                            // Check for common web framework methods
+                            if matches!(method_name, "to" | "service" | "route" | "middleware" | "guard") {
+                                // Extract identifier arguments
+                                for i in 0..node.child_count() {
+                                    if let Some(arg) = node.child(i) {
+                                        if arg.kind() == "arguments" {
+                                            for j in 0..arg.child_count() {
+                                                if let Some(arg_child) = arg.child(j) {
+                                                    if arg_child.kind() == "identifier" {
+                                                        let name = &source[arg_child.start_byte()..arg_child.end_byte()];
+                                                        calls.push(name.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         for child in node.children(&mut node.walk()) {
@@ -226,6 +257,34 @@ impl RustTranslator {
                 }
 
                 ast.add_function(func_def);
+            }
+        }
+
+        if node.kind() == "expression_statement" && impl_context.is_empty() {
+            // Handle top-level expression statements like router setup
+            // e.g., App::new().route("/path", handler_func) or app.service(handler)
+            let mut calls = Vec::new();
+            Self::extract_calls_recursive(node, source, &mut calls);
+            
+            if !calls.is_empty() {
+                // Create a virtual module-level function to track these references
+                let sig = Signature::empty();
+                let mut func_def = FunctionDef::new("<module>".to_string(), sig, module.to_string());
+                
+                for call_name in calls {
+                    let call = FunctionCall::new(call_name, None, 0);
+                    func_def.add_call(call);
+                }
+                
+                // Check if we already have a module-level function
+                if let Some(existing) = ast.functions.iter_mut().find(|f| f.name == "<module>") {
+                    // Add calls to existing module function
+                    for call in &func_def.calls {
+                        existing.add_call(call.clone());
+                    }
+                } else {
+                    ast.add_function(func_def);
+                }
             }
         }
 

@@ -218,3 +218,46 @@ fn test_translate_javascript_express_server() {
         assert!(call_targets.contains(&"errorHandler"));
     }
 }
+
+#[test]
+fn test_translate_python_flask_app() {
+    let translator = get_translator(Language::Python);
+    let ast = translator
+        .translate_file(fixture_path("python/flask_app.py").to_str().unwrap(), None)
+        .expect("Failed to translate Python Flask app");
+
+    assert!(!ast.module_path().is_empty());
+    // Should have at least 5 functions: handle_get_users, validate_user, error_handler, get_users, create_user
+    assert!(ast.functions.len() >= 5);
+    
+    // Verify we have all named functions
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"handle_get_users"));
+    assert!(func_names.contains(&"validate_user"));
+    assert!(func_names.contains(&"error_handler"));
+    assert!(func_names.contains(&"get_users"));
+    assert!(func_names.contains(&"create_user"));
+    
+    // Verify that module-level registrations are tracked with a <module> function
+    let module_func = ast.functions.iter().find(|f| f.name == "<module>");
+    assert!(module_func.is_some(), "Expected to find a <module> function tracking Flask registrations");
+}
+
+#[test]
+fn test_translate_rust_actix_app() {
+    let translator = get_translator(Language::Rust);
+    let ast = translator
+        .translate_file(fixture_path("rust/actix_app.rs").to_str().unwrap(), Some("actix_test"))
+        .expect("Failed to translate Rust Actix app");
+
+    assert_eq!(ast.module_path(), "actix_test");
+    // Should have at least 4 functions: get_users, create_user, validate_user, error_handler
+    assert!(ast.functions.len() >= 4);
+    
+    // Verify we have all named functions
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"get_users"));
+    assert!(func_names.contains(&"create_user"));
+    assert!(func_names.contains(&"validate_user"));
+    assert!(func_names.contains(&"error_handler"));
+}
