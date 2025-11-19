@@ -186,3 +186,35 @@ fn test_translate_javascript_with_classes() {
     assert!(func_names.contains(&"Logger.constructor"));
     assert!(func_names.contains(&"Logger.log"));
 }
+
+#[test]
+fn test_translate_javascript_express_server() {
+    let translator = get_translator(Language::JavaScript);
+    let ast = translator
+        .translate_file(fixture_path("javascript/express_server.js").to_str().unwrap(), None)
+        .expect("Failed to translate JavaScript Express server");
+
+    assert!(!ast.module_path().is_empty());
+    // Should have at least 4 functions: handleGetUsers, handleCreateUser, validateUser, errorHandler
+    assert!(ast.functions.len() >= 4);
+    
+    // Verify we have all named functions
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"handleGetUsers"));
+    assert!(func_names.contains(&"handleCreateUser"));
+    assert!(func_names.contains(&"validateUser"));
+    assert!(func_names.contains(&"errorHandler"));
+    
+    // Verify that routes and exports create edges - check that the <module> function
+    // has calls to the route handlers
+    let module_func = ast.functions.iter().find(|f| f.name == "<module>");
+    assert!(module_func.is_some(), "Expected to find a <module> function tracking route handlers");
+    
+    if let Some(module_f) = module_func {
+        // Should have calls to handleGetUsers, handleCreateUser, errorHandler
+        let call_targets: Vec<&str> = module_f.calls.iter().map(|c| c.target_name.as_str()).collect();
+        assert!(call_targets.contains(&"handleGetUsers"));
+        assert!(call_targets.contains(&"handleCreateUser"));
+        assert!(call_targets.contains(&"errorHandler"));
+    }
+}

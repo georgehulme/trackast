@@ -131,6 +131,75 @@ impl JavaScriptTranslator {
                     calls.push(name.to_string());
                 }
             }
+
+            // Also extract function references passed as arguments to method calls
+            // e.g., app.get('/path', handleGet) -> extract handleGet
+            // e.g., app.use(middleware) -> extract middleware
+            if let Some(callee) = node.child(0) {
+                if callee.kind() == "member_expression" {
+                    // Extract the method name to check if it's a known Express method
+                    let mut is_express_method = false;
+                    if let Some(property) = callee.child(callee.child_count() - 1) {
+                        if property.kind() == "property_identifier" {
+                            let method_name = &source[property.start_byte()..property.end_byte()];
+                            // Check for Express route methods
+                            is_express_method = matches!(method_name, "get" | "post" | "put" | "delete" | "patch" | "use" | "all");
+                        }
+                    }
+
+                    if is_express_method {
+                        // Extract identifiers from arguments
+                        for i in 0..node.child_count() {
+                            if let Some(arg) = node.child(i) {
+                                if arg.kind() == "arguments" {
+                                    for j in 0..arg.child_count() {
+                                        if let Some(arg_child) = arg.child(j) {
+                                            if arg_child.kind() == "identifier" {
+                                                let name = &source[arg_child.start_byte()..arg_child.end_byte()];
+                                                // Filter out common Express middleware parameter names
+                                                if name != "req" && name != "res" && name != "next" && name != "err" {
+                                                    calls.push(name.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract module.exports references
+        if node.kind() == "assignment_expression" {
+            // Look for module.exports = something pattern
+            let mut is_module_exports = false;
+
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "member_expression" {
+                    // Check if it's module.exports
+                    let text = &source[child.start_byte()..child.end_byte()];
+                    if text == "module.exports" {
+                        is_module_exports = true;
+                    }
+                }
+            }
+
+            if is_module_exports {
+                // Find the right side of the assignment
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i) {
+                        // Skip the assignment operator and member_expression
+                        if child.kind() != "=" && child.kind() != "member_expression" {
+                            if child.kind() == "identifier" {
+                                let name = &source[child.start_byte()..child.end_byte()];
+                                calls.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         for child in node.children(&mut node.walk()) {
@@ -210,6 +279,50 @@ impl JavaScriptTranslator {
 
                 ast.add_function(func_def);
             }
+        } else if node.kind() == "variable_declaration" && class_context.is_empty() {
+            // Handle const/let/var with arrow functions or function expressions
+            // e.g., const handler = () => {...}; or const handler = function() {...};
+            let child_count = node.child_count();
+            for i in 0..child_count {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "variable_declarator" {
+                        let mut var_name = String::new();
+                        let mut func_body_node: Option<tree_sitter::Node> = None;
+
+                        let decl_child_count = child.child_count();
+                        for j in 0..decl_child_count {
+                            if let Some(decl_child) = child.child(j) {
+                                if decl_child.kind() == "identifier" && var_name.is_empty() {
+                                    var_name = source[decl_child.start_byte()..decl_child.end_byte()].to_string();
+                                }
+                                // Check if it's an arrow function
+                                if decl_child.kind() == "arrow_function" {
+                                    func_body_node = Some(decl_child);
+                                }
+                            }
+                        }
+
+                        if !var_name.is_empty() && func_body_node.is_some() {
+                            if let Some(func_node) = func_body_node {
+                                // Extract calls from this function
+                                let mut calls = Vec::new();
+                                Self::extract_calls_from_function(func_node, source, &mut calls);
+
+                                // Create function definition
+                                let sig = Signature::empty();
+                                let mut func_def = FunctionDef::new(var_name, sig, module.to_string());
+                                
+                                for call_name in calls {
+                                    let call = FunctionCall::new(call_name, None, 0);
+                                    func_def.add_call(call);
+                                }
+
+                                ast.add_function(func_def);
+                            }
+                        }
+                    }
+                }
+            }
         } else if node.kind() == "method_definition" {
             // Handle JavaScript class methods
             let mut func_name = String::new();
@@ -236,6 +349,31 @@ impl JavaScriptTranslator {
                 }
 
                 ast.add_function(func_def);
+            }
+        } else if node.kind() == "expression_statement" && class_context.is_empty() {
+            // Handle top-level expression statements like app.get() or module.exports
+            let mut calls = Vec::new();
+            Self::extract_calls_recursive(node, source, &mut calls);
+            
+            if !calls.is_empty() {
+                // Create a virtual module-level function to track these references
+                let sig = Signature::empty();
+                let mut func_def = FunctionDef::new("<module>".to_string(), sig, module.to_string());
+                
+                for call_name in calls {
+                    let call = FunctionCall::new(call_name, None, 0);
+                    func_def.add_call(call);
+                }
+                
+                // Check if we already have a module-level function
+                if let Some(existing) = ast.functions.iter_mut().find(|f| f.name == "<module>") {
+                    // Add calls to existing module function
+                    for call in &func_def.calls {
+                        existing.add_call(call.clone());
+                    }
+                } else {
+                    ast.add_function(func_def);
+                }
             }
         }
 
