@@ -146,7 +146,7 @@ impl PythonTranslator {
         let mut ast = AbstractAST::new(module_path.to_string());
 
         // Extract all functions and their calls
-        Self::extract_ast_recursive(root, source, module_path, &mut ast);
+        Self::extract_ast_recursive(root, source, module_path, &mut ast, "");
 
         Ok(ast)
     }
@@ -157,7 +157,25 @@ impl PythonTranslator {
         source: &str,
         module: &str,
         ast: &mut AbstractAST,
+        class_context: &str,
     ) {
+        if node.kind() == "class_definition" {
+            // Extract class name
+            let mut class_name = String::new();
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "identifier" {
+                    class_name = source[child.start_byte()..child.end_byte()].to_string();
+                    break;
+                }
+            }
+
+            // Recursively process children with class context
+            for child in node.children(&mut node.walk()) {
+                Self::extract_ast_recursive(child, source, module, ast, &class_name);
+            }
+            return;
+        }
+
         if node.kind() == "function_definition" {
             // Extract function name
             let mut func_name = String::new();
@@ -173,9 +191,14 @@ impl PythonTranslator {
                 let mut calls = Vec::new();
                 Self::extract_calls_from_function(node, source, &mut calls);
 
-                // Create function definition
+                // Create function definition with class context
                 let sig = Signature::empty(); // Python has no explicit type signatures
-                let mut func_def = FunctionDef::new(func_name, sig, module.to_string());
+                let scoped_name = if class_context.is_empty() {
+                    func_name
+                } else {
+                    format!("{}.{}", class_context, func_name)
+                };
+                let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
                     let call = FunctionCall::new(call_name, None, 0);
@@ -187,7 +210,7 @@ impl PythonTranslator {
         }
 
         for child in node.children(&mut node.walk()) {
-            Self::extract_ast_recursive(child, source, module, ast);
+            Self::extract_ast_recursive(child, source, module, ast, class_context);
         }
     }
 

@@ -129,3 +129,60 @@ fn test_multi_language_support() {
         let _: &dyn Translator = &*translator;
     }
 }
+
+#[test]
+fn test_translate_python_with_classes() {
+    let translator = get_translator(Language::Python);
+    let ast = translator
+        .translate_file(fixture_path("python/with_classes.py").to_str().unwrap(), None)
+        .expect("Failed to translate Python file with classes");
+
+    assert!(!ast.module_path().is_empty());
+    // Should have 4 functions: Calculator.__init__, Calculator.add, Calculator.validate, Logger.__init__
+    assert_eq!(ast.functions.len(), 4);
+    
+    // Verify that methods have unique names scoped to their class
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"Calculator.__init__"));
+    assert!(func_names.contains(&"Calculator.add"));
+    assert!(func_names.contains(&"Calculator.validate"));
+    assert!(func_names.contains(&"Logger.__init__"));
+}
+
+#[test]
+fn test_translate_rust_with_impl() {
+    let translator = get_translator(Language::Rust);
+    let ast = translator
+        .translate_file(fixture_path("rust/with_impl.rs").to_str().unwrap(), Some("rust_impl_test"))
+        .expect("Failed to translate Rust file with impl blocks");
+
+    assert_eq!(ast.module_path(), "rust_impl_test");
+    // Should have 4 functions: Calculator::new, Calculator::add, Logger::new
+    assert_eq!(ast.functions.len(), 3);
+    
+    // Verify that methods have unique names scoped to their impl type
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"Calculator::new"));
+    assert!(func_names.contains(&"Calculator::add"));
+    assert!(func_names.contains(&"Logger::new"));
+}
+
+#[test]
+fn test_translate_javascript_with_classes() {
+    let translator = get_translator(Language::JavaScript);
+    let ast = translator
+        .translate_file(fixture_path("javascript/with_classes.js").to_str().unwrap(), None)
+        .expect("Failed to translate JavaScript file with classes");
+
+    assert!(!ast.module_path().is_empty());
+    // Should have 5 functions: Calculator.constructor, Calculator.add, Calculator.validate, Logger.constructor, Logger.log
+    assert_eq!(ast.functions.len(), 5);
+    
+    // Verify that methods have unique names scoped to their class
+    let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(func_names.contains(&"Calculator.constructor"));
+    assert!(func_names.contains(&"Calculator.add"));
+    assert!(func_names.contains(&"Calculator.validate"));
+    assert!(func_names.contains(&"Logger.constructor"));
+    assert!(func_names.contains(&"Logger.log"));
+}

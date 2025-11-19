@@ -166,7 +166,7 @@ impl RustTranslator {
         let mut ast = AbstractAST::new(module_path.to_string());
 
         // Extract all functions and their calls
-        Self::extract_ast_recursive(root, source, module_path, &mut ast);
+        Self::extract_ast_recursive(root, source, module_path, &mut ast, "");
 
         Ok(ast)
     }
@@ -177,7 +177,25 @@ impl RustTranslator {
         source: &str,
         module: &str,
         ast: &mut AbstractAST,
+        impl_context: &str,
     ) {
+        if node.kind() == "impl_item" {
+            // Extract the type being implemented for
+            let mut impl_type = String::new();
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "type_identifier" || child.kind() == "identifier" {
+                    impl_type = source[child.start_byte()..child.end_byte()].to_string();
+                    break;
+                }
+            }
+
+            // Recursively process children with impl context
+            for child in node.children(&mut node.walk()) {
+                Self::extract_ast_recursive(child, source, module, ast, &impl_type);
+            }
+            return;
+        }
+
         if node.kind() == "function_item" {
             // Extract function name
             let mut func_name = String::new();
@@ -193,9 +211,14 @@ impl RustTranslator {
                 let mut calls = Vec::new();
                 Self::extract_calls_from_function(node, source, &mut calls);
 
-                // Create function definition
+                // Create function definition with impl context
                 let sig = Signature::empty(); // Simplified for now
-                let mut func_def = FunctionDef::new(func_name, sig, module.to_string());
+                let scoped_name = if impl_context.is_empty() {
+                    func_name
+                } else {
+                    format!("{}::{}", impl_context, func_name)
+                };
+                let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
                     let call = FunctionCall::new(call_name, None, 0);
@@ -207,7 +230,7 @@ impl RustTranslator {
         }
 
         for child in node.children(&mut node.walk()) {
-            Self::extract_ast_recursive(child, source, module, ast);
+            Self::extract_ast_recursive(child, source, module, ast, impl_context);
         }
     }
 
