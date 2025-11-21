@@ -123,9 +123,17 @@ impl PythonTranslator {
         if node.kind() == "call" {
             // The function being called is the first child
             if let Some(child) = node.child(0) {
-                if child.kind() == "identifier" {
-                    let name = &source[child.start_byte()..child.end_byte()];
-                    calls.push(name.to_string());
+                match child.kind() {
+                    "identifier" => {
+                        // Direct function call: function_name()
+                        let name = &source[child.start_byte()..child.end_byte()];
+                        calls.push(name.to_string());
+                    }
+                    "attribute" => {
+                        // Attribute access call: obj.method() or self.method()
+                        Self::extract_attribute_call(child, source, calls);
+                    }
+                    _ => {}
                 }
             }
 
@@ -164,6 +172,46 @@ impl PythonTranslator {
 
         for child in node.children(&mut node.walk()) {
             Self::extract_calls_recursive(child, source, calls);
+        }
+    }
+
+    /// Extract method name from attribute access calls
+    fn extract_attribute_call(
+        attribute_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+    ) {
+        // Handle attribute access patterns: obj.method() or self.method()
+        // The attribute node should have structure: object "." attribute
+        let mut object_name = None;
+        let mut method_name = None;
+        
+        for child in attribute_node.children(&mut attribute_node.walk()) {
+            match child.kind() {
+                "identifier" => {
+                    if object_name.is_none() {
+                        // First identifier is the object (e.g., "self", "obj", etc.)
+                        object_name = Some(&source[child.start_byte()..child.end_byte()]);
+                    } else {
+                        // Second identifier is the method name
+                        method_name = Some(&source[child.start_byte()..child.end_byte()]);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(obj), Some(method)) = (object_name, method_name) {
+            if obj == "self" {
+                // For self.method() calls, just use the method name
+                // It will be resolved to the current class context
+                calls.push(method.to_string());
+            } else {
+                // For other object method calls (e.g., obj.method()), 
+                // we can't easily resolve the type, so just record the method name
+                // This could be enhanced with more sophisticated type tracking
+                calls.push(method.to_string());
+            }
         }
     }
 
@@ -219,9 +267,9 @@ impl PythonTranslator {
             }
 
             if !func_name.is_empty() {
-                // Extract calls from this function
+                // Extract calls from this function with class context for resolution
                 let mut calls = Vec::new();
-                Self::extract_calls_from_function(node, source, &mut calls);
+                Self::extract_calls_from_function_with_context(node, source, &mut calls, class_context);
 
                 // Create function definition with class context
                 let sig = Signature::empty(); // Python has no explicit type signatures
@@ -233,7 +281,15 @@ impl PythonTranslator {
                 let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains('.') {
+                        // For method calls like "MyClass.method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, leave as None (external)
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
 
@@ -252,7 +308,15 @@ impl PythonTranslator {
                 let mut func_def = FunctionDef::new("<module>".to_string(), sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains('.') {
+                        // For method calls like "MyClass.method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, leave as None (external)
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
                 
@@ -273,14 +337,120 @@ impl PythonTranslator {
         }
     }
 
-    /// Extract calls within a single function
-    fn extract_calls_from_function(
+
+    /// Extract calls within a single function with class context for better resolution
+    fn extract_calls_from_function_with_context(
         func_node: tree_sitter::Node,
         source: &str,
         calls: &mut Vec<String>,
+        class_context: &str,
     ) {
         for child in func_node.children(&mut func_node.walk()) {
-            Self::extract_calls_recursive(child, source, calls);
+            Self::extract_calls_recursive_with_context(child, source, calls, class_context);
+        }
+    }
+
+    /// Recursively find function calls with class context for better resolution
+    fn extract_calls_recursive_with_context(
+        node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        class_context: &str,
+    ) {
+        // Look for call nodes
+        if node.kind() == "call" {
+            // The function being called is the first child
+            if let Some(child) = node.child(0) {
+                match child.kind() {
+                    "identifier" => {
+                        // Direct function call: function_name()
+                        let name = &source[child.start_byte()..child.end_byte()];
+                        calls.push(name.to_string());
+                    }
+                    "attribute" => {
+                        // Attribute access call: obj.method() or self.method()
+                        Self::extract_attribute_call_with_context(child, source, calls, class_context);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Extract function references passed to method calls like app.add_url_rule()
+            // e.g., app.add_url_rule('/users', view_func=get_users)
+            // e.g., app.register_error_handler(500, error_handler)
+            if let Some(callee) = node.child(0) {
+                if callee.kind() == "attribute" {
+                    // Get the method name
+                    let callee_text = &source[callee.start_byte()..callee.end_byte()];
+                    // Check for common Flask/Django methods
+                    if callee_text.ends_with(".add_url_rule") 
+                        || callee_text.ends_with(".register_error_handler")
+                        || callee_text.ends_with(".register_blueprint")
+                        || callee_text.ends_with(".before_request")
+                        || callee_text.ends_with(".after_request") {
+                        // Extract identifier arguments (function references)
+                        for i in 0..node.child_count() {
+                            if let Some(arg) = node.child(i) {
+                                if arg.kind() == "arguments" {
+                                    for j in 0..arg.child_count() {
+                                        if let Some(arg_child) = arg.child(j) {
+                                            if arg_child.kind() == "identifier" {
+                                                let name = &source[arg_child.start_byte()..arg_child.end_byte()];
+                                                calls.push(name.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for child in node.children(&mut node.walk()) {
+            Self::extract_calls_recursive_with_context(child, source, calls, class_context);
+        }
+    }
+
+    /// Extract method name from attribute access calls with class context
+    fn extract_attribute_call_with_context(
+        attribute_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        class_context: &str,
+    ) {
+        // Handle attribute access patterns: obj.method() or self.method()
+        // The attribute node should have structure: object "." attribute
+        let mut object_name = None;
+        let mut method_name = None;
+        
+        for child in attribute_node.children(&mut attribute_node.walk()) {
+            match child.kind() {
+                "identifier" => {
+                    if object_name.is_none() {
+                        // First identifier is the object (e.g., "self", "obj", etc.)
+                        object_name = Some(&source[child.start_byte()..child.end_byte()]);
+                    } else {
+                        // Second identifier is the method name
+                        method_name = Some(&source[child.start_byte()..child.end_byte()]);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(obj), Some(method)) = (object_name, method_name) {
+            if obj == "self" && !class_context.is_empty() {
+                // For self.method() calls, resolve to the current class context
+                let resolved_method = format!("{}.{}", class_context, method);
+                calls.push(resolved_method);
+            } else {
+                // For other object method calls (e.g., obj.method()), 
+                // we can't easily resolve the type, so just record the method name
+                // This could be enhanced with more sophisticated type tracking
+                calls.push(method.to_string());
+            }
         }
     }
 

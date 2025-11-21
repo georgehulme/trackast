@@ -126,9 +126,17 @@ impl JavaScriptTranslator {
         if node.kind() == "call_expression" {
             // The function being called is the first child
             if let Some(child) = node.child(0) {
-                if child.kind() == "identifier" {
-                    let name = &source[child.start_byte()..child.end_byte()];
-                    calls.push(name.to_string());
+                match child.kind() {
+                    "identifier" => {
+                        // Direct function call: function_name()
+                        let name = &source[child.start_byte()..child.end_byte()];
+                        calls.push(name.to_string());
+                    }
+                    "member_expression" => {
+                        // Member access call: obj.method() or this.method()
+                        Self::extract_member_call(child, source, calls);
+                    }
+                    _ => {}
                 }
             }
 
@@ -207,6 +215,183 @@ impl JavaScriptTranslator {
         }
     }
 
+    /// Extract method name from member access calls
+    fn extract_member_call(
+        member_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+    ) {
+        // Handle member access patterns: obj.method() or this.method()
+        // The member_expression node should have structure: object property
+        let mut object_name = None;
+        let mut method_name = None;
+        
+        if let Some(object) = member_node.child(0) {
+            object_name = Some(&source[object.start_byte()..object.end_byte()]);
+        }
+        
+        if let Some(property) = member_node.child(member_node.child_count() - 1) {
+            if property.kind() == "property_identifier" {
+                method_name = Some(&source[property.start_byte()..property.end_byte()]);
+            }
+        }
+
+        if let (Some(obj), Some(method)) = (object_name, method_name) {
+            if obj == "this" {
+                // For this.method() calls, just use the method name
+                // It will be resolved to the current class context
+                calls.push(method.to_string());
+            } else {
+                // For other object method calls (e.g., obj.method()), 
+                // we can't easily resolve the type, so just record the method name
+                calls.push(method.to_string());
+            }
+        }
+    }
+
+    /// Extract method name from member access calls with class context
+    fn extract_member_call_with_context(
+        member_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        class_context: &str,
+    ) {
+        // Handle member access patterns: obj.method() or this.method()
+        let mut object_name = None;
+        let mut method_name = None;
+        
+        if let Some(object) = member_node.child(0) {
+            object_name = Some(&source[object.start_byte()..object.end_byte()]);
+        }
+        
+        if let Some(property) = member_node.child(member_node.child_count() - 1) {
+            if property.kind() == "property_identifier" {
+                method_name = Some(&source[property.start_byte()..property.end_byte()]);
+            }
+        }
+
+        if let (Some(obj), Some(method)) = (object_name, method_name) {
+            if obj == "this" && !class_context.is_empty() {
+                // For this.method() calls, resolve to the current class context
+                let resolved_method = format!("{}.{}", class_context, method);
+                calls.push(resolved_method);
+            } else {
+                // For other object method calls (e.g., obj.method()), 
+                // we can't easily resolve the type, so just record the method name
+                calls.push(method.to_string());
+            }
+        }
+    }
+
+    /// Extract calls within a single function with class context for better resolution
+    fn extract_calls_from_function_with_context(
+        func_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        class_context: &str,
+    ) {
+        for child in func_node.children(&mut func_node.walk()) {
+            Self::extract_calls_recursive_with_context(child, source, calls, class_context);
+        }
+    }
+
+    /// Recursively find function calls with class context for better resolution
+    fn extract_calls_recursive_with_context(
+        node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        class_context: &str,
+    ) {
+        // Look for call_expression nodes
+        if node.kind() == "call_expression" {
+            // The function being called is the first child
+            if let Some(child) = node.child(0) {
+                match child.kind() {
+                    "identifier" => {
+                        // Direct function call: function_name()
+                        let name = &source[child.start_byte()..child.end_byte()];
+                        calls.push(name.to_string());
+                    }
+                    "member_expression" => {
+                        // Member access call: obj.method() or this.method()
+                        Self::extract_member_call_with_context(child, source, calls, class_context);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Also extract function references passed as arguments to method calls
+            // e.g., app.get('/path', handleGet) -> extract handleGet
+            // e.g., app.use(middleware) -> extract middleware
+            if let Some(callee) = node.child(0) {
+                if callee.kind() == "member_expression" {
+                    // Extract the method name to check if it's a known Express method
+                    let mut is_express_method = false;
+                    if let Some(property) = callee.child(callee.child_count() - 1) {
+                        if property.kind() == "property_identifier" {
+                            let method_name = &source[property.start_byte()..property.end_byte()];
+                            // Check for Express route methods
+                            is_express_method = matches!(method_name, "get" | "post" | "put" | "delete" | "patch" | "use" | "all");
+                        }
+                    }
+
+                    if is_express_method {
+                        // Extract identifier arguments (function references)
+                        for i in 0..node.child_count() {
+                            if let Some(arg) = node.child(i) {
+                                if arg.kind() == "arguments" {
+                                    for j in 0..arg.child_count() {
+                                        if let Some(arg_child) = arg.child(j) {
+                                            if arg_child.kind() == "identifier" {
+                                                let name = &source[arg_child.start_byte()..arg_child.end_byte()];
+                                                calls.push(name.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract module.exports references
+        if node.kind() == "assignment_expression" {
+            // Look for module.exports = something pattern
+            let mut is_module_exports = false;
+
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "member_expression" {
+                    // Check if it's module.exports
+                    let text = &source[child.start_byte()..child.end_byte()];
+                    if text == "module.exports" {
+                        is_module_exports = true;
+                    }
+                }
+            }
+
+            if is_module_exports {
+                // Find the right side of the assignment
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i) {
+                        // Skip the assignment operator and member_expression
+                        if child.kind() != "=" && child.kind() != "member_expression" {
+                            if child.kind() == "identifier" {
+                                let name = &source[child.start_byte()..child.end_byte()];
+                                calls.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for child in node.children(&mut node.walk()) {
+            Self::extract_calls_recursive_with_context(child, source, calls, class_context);
+        }
+    }
+
     /// Translate JavaScript source to abstract AST
     ///
     /// # Errors
@@ -259,9 +444,9 @@ impl JavaScriptTranslator {
             }
 
             if !func_name.is_empty() {
-                // Extract calls from this function
+                // Extract calls from this function with class context for resolution
                 let mut calls = Vec::new();
-                Self::extract_calls_from_function(node, source, &mut calls);
+                Self::extract_calls_from_function_with_context(node, source, &mut calls, class_context);
 
                 // Create function definition with class context
                 let sig = Signature::empty();
@@ -273,7 +458,15 @@ impl JavaScriptTranslator {
                 let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains('.') {
+                        // For method calls like "MyClass.method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, leave as None (external)
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
 
@@ -304,16 +497,24 @@ impl JavaScriptTranslator {
 
                         if !var_name.is_empty() && func_body_node.is_some() {
                             if let Some(func_node) = func_body_node {
-                                // Extract calls from this function
+                                // Extract calls from this function (no class context for top-level functions)
                                 let mut calls = Vec::new();
-                                Self::extract_calls_from_function(func_node, source, &mut calls);
+                                Self::extract_calls_from_function_with_context(func_node, source, &mut calls, "");
 
                                 // Create function definition
                                 let sig = Signature::empty();
                                 let mut func_def = FunctionDef::new(var_name, sig, module.to_string());
                                 
                                 for call_name in calls {
-                                    let call = FunctionCall::new(call_name, None, 0);
+                                    // Determine if this is a local call that should be resolved within the module
+                                    let target_module = if call_name.contains('.') {
+                                        // For method calls like "MyClass.method2", try to resolve within current module
+                                        Some(module.to_string())
+                                    } else {
+                                        // For simple function calls, leave as None (external)
+                                        None
+                                    };
+                                    let call = FunctionCall::new(call_name, target_module, 0);
                                     func_def.add_call(call);
                                 }
 
@@ -334,9 +535,9 @@ impl JavaScriptTranslator {
             }
 
             if !func_name.is_empty() {
-                // Extract calls from this method
+                // Extract calls from this method with class context for resolution
                 let mut calls = Vec::new();
-                Self::extract_calls_from_function(node, source, &mut calls);
+                Self::extract_calls_from_function_with_context(node, source, &mut calls, class_context);
 
                 // Create function definition with class context
                 let sig = Signature::empty();
@@ -344,7 +545,15 @@ impl JavaScriptTranslator {
                 let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains('.') {
+                        // For method calls like "MyClass.method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, leave as None (external)
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
 
@@ -361,7 +570,15 @@ impl JavaScriptTranslator {
                 let mut func_def = FunctionDef::new("<module>".to_string(), sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains('.') {
+                        // For method calls like "MyClass.method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, leave as None (external)
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
                 

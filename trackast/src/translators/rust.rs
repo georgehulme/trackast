@@ -168,14 +168,38 @@ impl RustTranslator {
         node: tree_sitter::Node,
         source: &str,
     ) -> Option<String> {
+        Self::extract_identifier_or_field_access_with_context(node, source, "")
+    }
+
+    /// Extract identifier from a node with context (handles simple identifiers and field access)
+    fn extract_identifier_or_field_access_with_context(
+        node: tree_sitter::Node,
+        source: &str,
+        impl_context: &str,
+    ) -> Option<String> {
         match node.kind() {
             "identifier" => {
                 let text = &source[node.start_byte()..node.end_byte()];
                 Some(text.to_string())
             }
             "field_expression" => {
+                // Check if this is a self.method() call
+                if let Some(object) = node.child(0) {
+                    let object_text = &source[object.start_byte()..object.end_byte()];
+                    if object_text == "self" && !impl_context.is_empty() {
+                        // This is self.method() - resolve to current impl context
+                        if let Some(field) = node.child(2) { // field might be at index 2 (object, dot, field)
+                            if field.kind() == "field_identifier" { // might be field_identifier not field
+                                let method_name = &source[field.start_byte()..field.end_byte()];
+                                return Some(format!("{}::{}", impl_context, method_name));
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback: just extract the field name
                 if let Some(child) = node.child(node.child_count() - 1) {
-                    if child.kind() == "field" {
+                    if child.kind() == "field_identifier" {
                         let text = &source[child.start_byte()..child.end_byte()];
                         return Some(text.to_string());
                     }
@@ -238,9 +262,9 @@ impl RustTranslator {
             }
 
             if !func_name.is_empty() {
-                // Extract calls from this function
+                // Extract calls from this function with impl context for resolution
                 let mut calls = Vec::new();
-                Self::extract_calls_from_function(node, source, &mut calls);
+                Self::extract_calls_from_function_with_context(node, source, &mut calls, impl_context);
 
                 // Create function definition with impl context
                 let sig = Signature::empty(); // Simplified for now
@@ -252,7 +276,16 @@ impl RustTranslator {
                 let mut func_def = FunctionDef::new(scoped_name, sig, module.to_string());
                 
                 for call_name in calls {
-                    let call = FunctionCall::new(call_name, None, 0);
+                    // Determine if this is a local call that should be resolved within the module
+                    let target_module = if call_name.contains("::") {
+                        // For method calls like "MyStruct::method2", try to resolve within current module
+                        Some(module.to_string())
+                    } else {
+                        // For simple function calls, we can't determine easily, leave as None (external)
+                        // This could be enhanced with more sophisticated analysis
+                        None
+                    };
+                    let call = FunctionCall::new(call_name, target_module, 0);
                     func_def.add_call(call);
                 }
 
@@ -301,6 +334,70 @@ impl RustTranslator {
     ) {
         for child in func_node.children(&mut func_node.walk()) {
             Self::extract_calls_recursive(child, source, calls);
+        }
+    }
+
+    /// Extract calls within a single function with impl context for better resolution
+    fn extract_calls_from_function_with_context(
+        func_node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        impl_context: &str,
+    ) {
+        for child in func_node.children(&mut func_node.walk()) {
+            Self::extract_calls_recursive_with_context(child, source, calls, impl_context);
+        }
+    }
+
+    /// Recursively find function calls with impl context for better resolution
+    fn extract_calls_recursive_with_context(
+        node: tree_sitter::Node,
+        source: &str,
+        calls: &mut Vec<String>,
+        impl_context: &str,
+    ) {
+        if node.kind() == "call_expression" {
+            if let Some(child) = node.child(0) {
+                let call_name = Self::extract_identifier_or_field_access_with_context(child, source, impl_context);
+                if let Some(name) = call_name {
+                    calls.push(name);
+                }
+            }
+
+            // Extract function references passed to method calls like .to(), .service()
+            // e.g., .route("/path", web::get().to(handler_func))
+            if let Some(callee) = node.child(0) {
+                if callee.kind() == "field_expression" {
+                    // Get the method name
+                    if let Some(field) = callee.child(callee.child_count() - 1) {
+                        if field.kind() == "field" {
+                            let method_name = &source[field.start_byte()..field.end_byte()];
+                            // Check for common web framework methods
+                            if matches!(method_name, "to" | "service" | "route" | "middleware" | "guard") {
+                                // Extract identifier arguments
+                                for i in 0..node.child_count() {
+                                    if let Some(arg) = node.child(i) {
+                                        if arg.kind() == "arguments" {
+                                            for j in 0..arg.child_count() {
+                                                if let Some(arg_child) = arg.child(j) {
+                                                    if arg_child.kind() == "identifier" {
+                                                        let name = &source[arg_child.start_byte()..arg_child.end_byte()];
+                                                        calls.push(name.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for child in node.children(&mut node.walk()) {
+            Self::extract_calls_recursive_with_context(child, source, calls, impl_context);
         }
     }
 

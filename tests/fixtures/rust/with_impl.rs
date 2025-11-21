@@ -8,7 +8,12 @@ impl Calculator {
     }
 
     fn add(&mut self, x: i32) {
+        self.validate();
         self.value += x;
+    }
+    
+    fn validate(&self) {
+        // validation logic
     }
 }
 

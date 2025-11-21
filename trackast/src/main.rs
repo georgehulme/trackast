@@ -7,6 +7,29 @@ use trackast_lib::graph::CallGraph;
 use trackast::module_loader::ModuleLoader;
 use trackast::language::Language;
 use std::path::{PathBuf, Path};
+use serde_json;
+
+#[derive(Debug, Clone)]
+enum OutputStage {
+    Modules,
+    Ast,
+    Calls,
+    Graph,
+}
+
+impl std::str::FromStr for OutputStage {
+    type Err = String;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "modules" => Ok(OutputStage::Modules),
+            "ast" => Ok(OutputStage::Ast),
+            "calls" => Ok(OutputStage::Calls),
+            "graph" => Ok(OutputStage::Graph),
+            _ => Err(format!("Invalid stage: {s}. Must be one of: modules, ast, calls, graph")),
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "trackast")]
@@ -45,6 +68,10 @@ struct Args {
     /// Example: --entry-points `myapp::main` --entry-points `api::handler`
     #[arg(long)]
     entry_points: Vec<String>,
+
+    /// Output stage: modules, ast, calls, or graph
+    #[arg(long, default_value = "graph")]
+    stage: OutputStage,
 }
 
 fn resolve_entry_points(
@@ -261,11 +288,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     eprintln!("📂 Using root directory: {}", root_dir.display());
 
+    // Handle modules stage early (before AST loading)
+    if matches!(args.stage, OutputStage::Modules) {
+        let output = serde_json::json!({
+            "message": "Module discovery info not yet exposed",
+            "entry_file": args.input.to_str().unwrap_or("")
+        }).to_string();
+        
+        if let Some(output_path) = &args.output {
+            std::fs::write(output_path, &output)?;
+            eprintln!("✅ Module info written to {}", output_path.display());
+        } else {
+            println!("{output}");
+        }
+        return Ok(());
+    }
+
     // Load AST
     let ast = load_ast(language, &args.input, &root_dir, args.module, args.no_discover)?;
     eprintln!("📦 Found {} functions", ast.functions.len());
 
-    // Build call graph
+    // Handle AST stage (before graph building)  
+    if matches!(args.stage, OutputStage::Ast) {
+        let output = serde_json::to_string_pretty(&ast)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
+            
+        if let Some(output_path) = &args.output {
+            std::fs::write(output_path, &output)?;
+            eprintln!("✅ AST written to {}", output_path.display());
+        } else {
+            println!("{output}");
+        }
+        return Ok(());
+    }
+
+    // Handle calls stage (before graph building)
+    if matches!(args.stage, OutputStage::Calls) {
+        let calls: Vec<_> = ast.functions.iter()
+            .flat_map(|f| f.calls.iter().map(move |c| (f, c)))
+            .collect();
+        let output = serde_json::to_string_pretty(&calls)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
+            
+        if let Some(output_path) = &args.output {
+            std::fs::write(output_path, &output)?;
+            eprintln!("✅ Function calls written to {}", output_path.display());
+        } else {
+            println!("{output}");
+        }
+        return Ok(());
+    }
+
+    // Build call graph (only for Graph stage)
     let mut builder = CallGraphBuilder::new();
     builder.add_ast(ast)?;
     let graph = builder.build()?;

@@ -1,7 +1,8 @@
 use std::fmt;
+use serde::Serialize;
 
 /// Function signature with parameters and return type
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Signature {
     pub params: Vec<(String, String)>, // (name, type)
     pub return_type: String,
@@ -35,7 +36,7 @@ impl fmt::Display for Signature {
 }
 
 /// A function call within another function
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FunctionCall {
     pub target_name: String,
     pub target_module: Option<String>, // None = unresolved/external
@@ -54,7 +55,7 @@ impl FunctionCall {
 }
 
 /// A function definition extracted from source code
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FunctionDef {
     pub name: String,
     pub signature: Signature,
@@ -90,7 +91,7 @@ impl FunctionDef {
 }
 
 /// Abstract syntax tree representation of code, language-independent
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AbstractAST {
     pub functions: Vec<FunctionDef>,
     pub module_path: String,

@@ -147,6 +147,47 @@ fn test_translate_python_with_classes() {
     assert!(func_names.contains(&"Calculator.add"));
     assert!(func_names.contains(&"Calculator.validate"));
     assert!(func_names.contains(&"Logger.__init__"));
+    
+    // Verify that self.validate() call in Calculator.add() is properly detected
+    let calculator_add = ast.functions.iter().find(|f| f.name == "Calculator.add").unwrap();
+    assert_eq!(calculator_add.calls.len(), 1, "Calculator.add should have exactly 1 call");
+    
+    let validate_call = &calculator_add.calls[0];
+    assert_eq!(validate_call.target_name, "Calculator.validate", 
+               "Calculator.add should call Calculator.validate");
+    assert_eq!(validate_call.target_module, Some(ast.module_path().to_string()),
+               "Calculator.validate call should be resolved to the same module");
+}
+
+#[test]
+fn test_python_class_method_call_graph_resolution() {
+    let translator = get_translator(Language::Python);
+    let ast = translator
+        .translate_file(fixture_path("python/with_classes.py").to_str().unwrap(), None)
+        .expect("Failed to translate Python file with classes");
+
+    // Build the call graph to verify end-to-end resolution
+    let mut builder = CallGraphBuilder::new();
+    builder.add_ast(ast).expect("Failed to add AST");
+    let graph = builder.build().expect("Failed to build graph");
+
+    // Find the Calculator.add and Calculator.validate nodes
+    let add_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator.add"))
+        .expect("Should find Calculator.add function");
+    
+    let validate_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator.validate"))
+        .expect("Should find Calculator.validate function");
+
+    // Verify there's an edge from Calculator.add to Calculator.validate
+    let edges_from_add: Vec<_> = graph.edges.iter()
+        .filter(|edge| edge.from == *add_id)
+        .collect();
+    
+    assert_eq!(edges_from_add.len(), 1, "Calculator.add should have exactly 1 outgoing edge");
+    assert_eq!(edges_from_add[0].to, *validate_id, 
+               "Calculator.add should have an edge to Calculator.validate");
 }
 
 #[test]
@@ -157,14 +198,56 @@ fn test_translate_rust_with_impl() {
         .expect("Failed to translate Rust file with impl blocks");
 
     assert_eq!(ast.module_path(), "rust_impl_test");
-    // Should have 4 functions: Calculator::new, Calculator::add, Logger::new
-    assert_eq!(ast.functions.len(), 3);
+    // Should have 4 functions: Calculator::new, Calculator::add, Calculator::validate, Logger::new
+    assert_eq!(ast.functions.len(), 4);
     
     // Verify that methods have unique names scoped to their impl type
     let func_names: Vec<&str> = ast.functions.iter().map(|f| f.name.as_str()).collect();
     assert!(func_names.contains(&"Calculator::new"));
     assert!(func_names.contains(&"Calculator::add"));
+    assert!(func_names.contains(&"Calculator::validate"));
     assert!(func_names.contains(&"Logger::new"));
+    
+    // Verify that self.validate() call in Calculator::add() is properly detected
+    let calculator_add = ast.functions.iter().find(|f| f.name == "Calculator::add").unwrap();
+    assert_eq!(calculator_add.calls.len(), 1, "Calculator::add should have exactly 1 call");
+    
+    let validate_call = &calculator_add.calls[0];
+    assert_eq!(validate_call.target_name, "Calculator::validate", 
+               "Calculator::add should call Calculator::validate");
+    assert_eq!(validate_call.target_module, Some(ast.module_path().to_string()),
+               "Calculator::validate call should be resolved to the same module");
+}
+
+#[test]
+fn test_rust_impl_method_call_graph_resolution() {
+    let translator = get_translator(Language::Rust);
+    let ast = translator
+        .translate_file(fixture_path("rust/with_impl.rs").to_str().unwrap(), Some("rust_impl_test"))
+        .expect("Failed to translate Rust file with impl blocks");
+
+    // Build the call graph to verify end-to-end resolution
+    let mut builder = CallGraphBuilder::new();
+    builder.add_ast(ast).expect("Failed to add AST");
+    let graph = builder.build().expect("Failed to build graph");
+
+    // Find the Calculator::add and Calculator::validate nodes
+    let add_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator::add"))
+        .expect("Should find Calculator::add function");
+    
+    let validate_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator::validate"))
+        .expect("Should find Calculator::validate function");
+
+    // Verify there's an edge from Calculator::add to Calculator::validate
+    let edges_from_add: Vec<_> = graph.edges.iter()
+        .filter(|edge| edge.from == *add_id)
+        .collect();
+    
+    assert_eq!(edges_from_add.len(), 1, "Calculator::add should have exactly 1 outgoing edge");
+    assert_eq!(edges_from_add[0].to, *validate_id, 
+               "Calculator::add should have an edge to Calculator::validate");
 }
 
 #[test]
@@ -185,6 +268,47 @@ fn test_translate_javascript_with_classes() {
     assert!(func_names.contains(&"Calculator.validate"));
     assert!(func_names.contains(&"Logger.constructor"));
     assert!(func_names.contains(&"Logger.log"));
+    
+    // Verify that this.validate() call in Calculator.add() is properly detected
+    let calculator_add = ast.functions.iter().find(|f| f.name == "Calculator.add").unwrap();
+    assert_eq!(calculator_add.calls.len(), 1, "Calculator.add should have exactly 1 call");
+    
+    let validate_call = &calculator_add.calls[0];
+    assert_eq!(validate_call.target_name, "Calculator.validate", 
+               "Calculator.add should call Calculator.validate");
+    assert_eq!(validate_call.target_module, Some(ast.module_path().to_string()),
+               "Calculator.validate call should be resolved to the same module");
+}
+
+#[test]
+fn test_javascript_class_method_call_graph_resolution() {
+    let translator = get_translator(Language::JavaScript);
+    let ast = translator
+        .translate_file(fixture_path("javascript/with_classes.js").to_str().unwrap(), None)
+        .expect("Failed to translate JavaScript file with classes");
+
+    // Build the call graph to verify end-to-end resolution
+    let mut builder = CallGraphBuilder::new();
+    builder.add_ast(ast).expect("Failed to add AST");
+    let graph = builder.build().expect("Failed to build graph");
+
+    // Find the Calculator.add and Calculator.validate nodes
+    let add_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator.add"))
+        .expect("Should find Calculator.add function");
+    
+    let validate_id = graph.nodes.keys()
+        .find(|id| id.as_str().contains("Calculator.validate"))
+        .expect("Should find Calculator.validate function");
+
+    // Verify there's an edge from Calculator.add to Calculator.validate
+    let edges_from_add: Vec<_> = graph.edges.iter()
+        .filter(|edge| edge.from == *add_id)
+        .collect();
+    
+    assert_eq!(edges_from_add.len(), 1, "Calculator.add should have exactly 1 outgoing edge");
+    assert_eq!(edges_from_add[0].to, *validate_id, 
+               "Calculator.add should have an edge to Calculator.validate");
 }
 
 #[test]
